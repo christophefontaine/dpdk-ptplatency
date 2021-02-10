@@ -172,6 +172,7 @@ ns_to_timeval(int64_t nsec)
 
 	return t_eval;
 }
+
 /*
 static void
 port_ieee1588_rx_timestamp_check(uint16_t pi, uint32_t index)
@@ -321,7 +322,7 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 			(ptp_data->ts_fup.tv_nsec));
 
 	
-	printf("\nDelay: %ldns", delta);
+	printf("\nRound trip delay: %ldns", delta);
 	ptp_data->delta_acc[ptp_data->seqID_SYNC%DELTA_SAMPLES] = delta>0?delta:-delta;
 	for (int i = 0 ; i < DELTA_SAMPLES ; i++) {
 		delta_avg += ptp_data->delta_acc[i];
@@ -331,7 +332,7 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 
 	delta = delta > 0 ? delta : -delta;
 	ptp_data->delta_max = delta > ptp_data->delta_max ? delta : ptp_data->delta_max;
-	printf("\nMax Delay: %ldns",  ptp_data->delta_max);
+	printf("\nMax round trip delay: %ldns",  ptp_data->delta_max);
 	
 	clock_gettime(CLOCK_REALTIME, &sys_time);
 	rte_eth_timesync_read_time(ptp_data->current_ptp_port, &net_time);
@@ -383,8 +384,7 @@ parse_sync(struct ptpv2_data_slave_ordinary *ptp_data, uint16_t rx_tstamp_idx)
 		ptp_data->ptpset = 1;
 	}
 
-	if (memcmp(&ptp_data->master_clock_id,
-         	   &ptp_hdr->source_port_id.clock_id,
+	if (memcmp(&ptp_data->master_clock_id, &ptp_hdr->source_port_id.clock_id,
 		   sizeof(struct clock_id)) == 0) {
 		if (ptp_data->ptpset == 1) {
 			rte_eth_timesync_read_rx_timestamp(ptp_data->portid,
@@ -523,16 +523,23 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 
 	switch(ptp_msg->header.msg_type) {
 		case SYNC:
-			ptp_msg->header.message_length = htons(sizeof(struct sync_msg));
+			if (ptp_data.ptp_frame_size > sizeof(struct sync_msg))
+				ptp_msg->header.message_length = htons(ptp_data.ptp_frame_size);
+			else
+				ptp_msg->header.message_length = htons(sizeof(struct sync_msg));
+			ptp_msg->header.control = 0;
 		    break;
 		case DELAY_REQ:
 			ptp_msg->header.message_length = htons(sizeof(struct delay_req_msg));
-			break;
-		case DELAY_RESP:
-			ptp_msg->header.message_length = htons(sizeof(struct delay_resp_msg));
+			ptp_msg->header.control = 1;
 			break;
 		case FOLLOW_UP: 
 			ptp_msg->header.message_length = htons(sizeof(struct follow_up_msg));
+			ptp_msg->header.control = 2;
+			break;
+		case DELAY_RESP:
+			ptp_msg->header.message_length = htons(sizeof(struct delay_resp_msg));
+			ptp_msg->header.control = 3;
 			break;
 		default:
 			ptp_msg->header.message_length = htons(sizeof(struct ptp_message));
@@ -542,8 +549,6 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 	created_pkt->ol_flags |= PKT_TX_IEEE1588_TMST;
 
 	pkt_size = sizeof(struct rte_ether_hdr) + ntohs(ptp_msg->header.message_length);
-	if (ptp_data.ptp_frame_size)
-		pkt_size = ptp_data.ptp_frame_size;
 	created_pkt->data_len = pkt_size;
 	created_pkt->pkt_len = pkt_size;
 
@@ -555,7 +560,8 @@ static void resync_clock(uint16_t port_src, uint16_t port_dst) {
 	int64_t delta;
 	struct timespec src;
 	struct timespec dst;
-
+	if (port_src == port_dst)
+		return;
 
 	rte_eth_timesync_read_time(port_src, &src);
 	rte_eth_timesync_read_time(port_dst, &dst);
@@ -602,13 +608,12 @@ lcore_main(void)
 		}
 
 		if ( rte_atomic32_read(&send_ptp_frame_counter)) {
-			struct timespec tp;
-			clock_gettime(CLOCK_REALTIME, &tp);
-			for (portid = 0; portid < ptp_enabled_port_nb; portid++) {
-				if (portid != ptp_data.portid)
-					resync_clock(ptp_data.portid, portid);
-			}
+			// uint16_t tx_portid = ptp_data.portid;
 			uint16_t tx_portid = 0;
+
+			for (portid = 0; portid < ptp_enabled_port_nb; portid++) {
+				resync_clock(tx_portid, portid);
+			}
 			
 			struct rte_mbuf *sync_pkt = allocate_ptp_frame(SYNC, seq_ptp_counter);
 			struct rte_mbuf *fup_pkt = allocate_ptp_frame(FOLLOW_UP, seq_ptp_counter++);
@@ -617,29 +622,32 @@ lcore_main(void)
 
 			sync_msg = (struct ptp_message *) (rte_pktmbuf_mtod(sync_pkt, char *) +
 												sizeof(struct rte_ether_hdr));
+			/* PTP TWO STEPS: first SYNC message is followed by a FOLLOW_UP MESSAGE
+			 * which contains the origin timestamp of the SYNC message with the same
+			 * sequence id.
+			 * */
 			sync_msg->header.flag_field[0] = 0x2; //PTP_TWO_STEPS
 			fup_msg = (struct follow_up_msg *) (rte_pktmbuf_mtod(fup_pkt, char *) +
 												sizeof(struct rte_ether_hdr));
-			fup_msg->hdr.control = 2;
 
 
-		do {
-			struct timespec tstamp_tx;
-			// Read value from NIC to prevent latching with old value.
-			rte_eth_timesync_read_tx_timestamp(tx_portid, &tstamp_tx);
-			rte_delay_us(1);
-			rte_eth_tx_burst(tx_portid, 0, &sync_pkt, 1);
-			tstamp_tx.tv_nsec = 0;
-			tstamp_tx.tv_sec = 0;
+			do {
+				struct timespec tstamp_tx;
+				// Read value from NIC to prevent latching with old value.
+				rte_eth_timesync_read_tx_timestamp(tx_portid, &tstamp_tx);
+				rte_delay_us(1);
+				rte_eth_tx_burst(tx_portid, 0, &sync_pkt, 1);
+				tstamp_tx.tv_nsec = 0;
+				tstamp_tx.tv_sec = 0;
 
-			port_ieee1588_tx_timestamp_check(tx_portid, &tstamp_tx);
+				port_ieee1588_tx_timestamp_check(tx_portid, &tstamp_tx);
 
-			fup_msg->precise_origin_tstamp.ns = htonl(tstamp_tx.tv_nsec);
-			fup_msg->precise_origin_tstamp.sec_msb = htons((uint16_t)(tstamp_tx.tv_sec >> 32));
-			fup_msg->precise_origin_tstamp.sec_lsb = htonl((uint32_t)(tstamp_tx.tv_sec & UINT32_MAX));
+				fup_msg->precise_origin_tstamp.ns = htonl(tstamp_tx.tv_nsec);
+				fup_msg->precise_origin_tstamp.sec_msb = htons((uint16_t)(tstamp_tx.tv_sec >> 32));
+				fup_msg->precise_origin_tstamp.sec_lsb = htonl((uint32_t)(tstamp_tx.tv_sec & UINT32_MAX));
 
-			rte_eth_tx_burst(tx_portid, 0, &fup_pkt, 1);
-		} while( !rte_atomic32_dec_and_test(&send_ptp_frame_counter));
+				rte_eth_tx_burst(tx_portid, 0, &fup_pkt, 1);
+			} while( !rte_atomic32_dec_and_test(&send_ptp_frame_counter));
 
 		}
 	}
@@ -650,7 +658,7 @@ print_usage(const char *prgname)
 {
 	printf("%s [EAL options] -- -p PORTMASK -s FRAMESIZE \n"
 		" -p PORTMASK: hexadecimal bitmask of ports to configure\n"
-		" -s FRAMESIZE: overrides the frame size",
+		" -s FRAMESIZE: Size of the sync message",
 		prgname);
 }
 
