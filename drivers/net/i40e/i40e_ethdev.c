@@ -355,6 +355,8 @@ static int i40e_timesync_read_time(struct rte_eth_dev *dev,
 				   struct timespec *timestamp);
 static int i40e_timesync_write_time(struct rte_eth_dev *dev,
 				    const struct timespec *timestamp);
+static int i40e_timesync_read_clock(struct rte_eth_dev *dev,
+				    uint64_t *clock);
 
 static int i40e_dev_rx_queue_intr_enable(struct rte_eth_dev *dev,
 					 uint16_t queue_id);
@@ -501,6 +503,7 @@ static const struct eth_dev_ops i40e_eth_dev_ops = {
 	.timesync_adjust_time         = i40e_timesync_adjust_time,
 	.timesync_read_time           = i40e_timesync_read_time,
 	.timesync_write_time          = i40e_timesync_write_time,
+	.read_clock                   = i40e_timesync_read_clock,
 	.get_reg                      = i40e_get_regs,
 	.get_eeprom_length            = i40e_get_eeprom_length,
 	.get_eeprom                   = i40e_get_eeprom,
@@ -10539,6 +10542,13 @@ i40e_read_systime_cyclecounter(struct rte_eth_dev *dev)
 			<< 32;
 
 	return systim_cycles;
+}
+
+static int
+i40e_timesync_read_clock(struct rte_eth_dev *dev, uint64_t * clock)
+{
+    *clock = i40e_read_systime_cyclecounter(dev);
+    return 0;
 }
 
 static uint64_t
