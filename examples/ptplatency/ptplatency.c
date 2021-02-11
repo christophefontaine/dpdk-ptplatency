@@ -489,7 +489,8 @@ parse_ptp_frames(uint16_t portid, struct rte_mbuf *m) {
 }
 
 
-static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
+static struct rte_mbuf *
+allocate_ptp_frame(uint16_t portid, int msg_type, int seq_ptp_counter) {
 	struct rte_mbuf *created_pkt;
 	struct rte_ether_hdr *eth_hdr;
 	struct rte_ether_addr eth_addr;
@@ -497,8 +498,6 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 	struct ptp_message *ptp_msg;
 	struct rte_ether_addr eth_multicast = ether_dest;
 	size_t pkt_size;
-	ptp_data.portid = 0;
-
 
 	created_pkt = rte_pktmbuf_alloc(mbuf_pool);
 	pkt_size = sizeof(struct rte_ether_hdr) + sizeof(struct follow_up_msg);
@@ -547,25 +546,28 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 			else
 				ptp_msg->header.message_length = htons(sizeof(struct sync_msg));
 			ptp_msg->header.control = 0;
+			/* Enable flag for hardware timestamping. */
+			created_pkt->ol_flags |= PKT_TX_IEEE1588_TMST;
 		    break;
 		case DELAY_REQ:
 			ptp_msg->header.message_length = htons(sizeof(struct delay_req_msg));
 			ptp_msg->header.control = 1;
 			break;
 		case FOLLOW_UP: 
+		case PDELAY_RESP_FOLLOW_UP:
 			ptp_msg->header.message_length = htons(sizeof(struct follow_up_msg));
 			ptp_msg->header.control = 2;
 			break;
 		case DELAY_RESP:
 			ptp_msg->header.message_length = htons(sizeof(struct delay_resp_msg));
 			ptp_msg->header.control = 3;
+			/* Enable flag for hardware timestamping. */
+			created_pkt->ol_flags |= PKT_TX_IEEE1588_TMST;
 			break;
 		default:
 			ptp_msg->header.message_length = htons(sizeof(struct ptp_message));
 			break;
 	}
-	/* Enable flag for hardware timestamping. */
-	created_pkt->ol_flags |= PKT_TX_IEEE1588_TMST;
 
 	pkt_size = sizeof(struct rte_ether_hdr) + ntohs(ptp_msg->header.message_length);
 	created_pkt->data_len = pkt_size;
@@ -627,15 +629,15 @@ lcore_main(void)
 		}
 
 		if ( rte_atomic32_read(&send_ptp_frame_counter)) {
-			// uint16_t tx_portid = ptp_data.portid;
 			uint16_t tx_portid = 0;
+	//		tx_portid = ptp_data.portid;
 
 			for (portid = 0; portid < ptp_enabled_port_nb; portid++) {
 				resync_clock(tx_portid, portid);
 			}
 			
-			struct rte_mbuf *sync_pkt = allocate_ptp_frame(SYNC, seq_ptp_counter);
-			struct rte_mbuf *fup_pkt = allocate_ptp_frame(FOLLOW_UP, seq_ptp_counter++);
+			struct rte_mbuf *sync_pkt = allocate_ptp_frame(tx_portid, SYNC, seq_ptp_counter);
+			struct rte_mbuf *fup_pkt = allocate_ptp_frame(tx_portid, FOLLOW_UP, seq_ptp_counter++);
 			struct ptp_message *sync_msg;
 			struct follow_up_msg *fup_msg;
 
@@ -654,13 +656,12 @@ lcore_main(void)
 				struct timespec tstamp_tx;
 				// Read value from NIC to prevent latching with old value.
 				rte_eth_timesync_read_tx_timestamp(tx_portid, &tstamp_tx);
-				rte_delay_us(1);
+
 				rte_eth_tx_burst(tx_portid, 0, &sync_pkt, 1);
 				tstamp_tx.tv_nsec = 0;
 				tstamp_tx.tv_sec = 0;
 
 				port_ieee1588_tx_timestamp_check(tx_portid, &tstamp_tx);
-
 				fup_msg->precise_origin_tstamp.ns = htonl(tstamp_tx.tv_nsec);
 				fup_msg->precise_origin_tstamp.sec_msb = htons((uint16_t)(tstamp_tx.tv_sec >> 32));
 				fup_msg->precise_origin_tstamp.sec_lsb = htonl((uint32_t)(tstamp_tx.tv_sec & UINT32_MAX));
