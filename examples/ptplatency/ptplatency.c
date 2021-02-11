@@ -54,7 +54,8 @@ static const struct rte_eth_conf port_conf_default = {
 	},
 };
 
-static const struct rte_ether_addr ether_multicast = {
+static struct rte_ether_addr ether_dest = {
+	/* Defaults to PTP multicast addr */
 	.addr_bytes = {0x01, 0x1b, 0x19, 0x0, 0x0, 0x0}
 };
 
@@ -474,7 +475,7 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 	struct rte_ether_addr eth_addr;
 	struct clock_id *client_clkid;
 	struct ptp_message *ptp_msg;
-	struct rte_ether_addr eth_multicast = ether_multicast;
+	struct rte_ether_addr eth_multicast = ether_dest;
 	size_t pkt_size;
 	ptp_data.portid = 0;
 
@@ -485,13 +486,11 @@ static struct rte_mbuf * allocate_ptp_frame(int msg_type, int seq_ptp_counter) {
 	created_pkt->pkt_len = pkt_size;
 	eth_hdr = rte_pktmbuf_mtod(created_pkt, struct rte_ether_hdr *);
 	memset(eth_hdr, 0, pkt_size);
-	rte_eth_macaddr_get(ptp_data.portid, &eth_addr);
+	rte_eth_macaddr_get(portid, &eth_addr);
 	rte_ether_addr_copy(&eth_addr, &eth_hdr->s_addr);
 
-	/* Set multicast address 01-1B-19-00-00-00. */
+	/* Set destination address, defaults to 01-1B-19-00-00-00. */
 	rte_ether_addr_copy(&eth_multicast, &eth_hdr->d_addr);
-	/* For Peer messages, use multcast address 01-80-C2-00-00-0E */
-	// rte_ether_addr_copy(&eth_multicast_peer, &eth_hdr->d_addr);
 
 	eth_hdr->ether_type = htons(PTP_PROTOCOL);
 
@@ -702,11 +701,18 @@ ptp_parse_args(int argc, char **argv)
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, "p:T:s:",
+	while ((opt = getopt_long(argc, argvopt, "p:T:s:d:",
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
-
+		/* Destination mac address */
+		case 'd':
+			if (rte_ether_unformat_addr(optarg, &ether_dest)) {
+				printf("Invalid ether mac address");
+				print_usage(prgname);
+				return -1;
+			}
+			break;
 		/* Portmask. */
 		case 'p':
 			ptp_enabled_port_mask = ptp_parse_portmask(optarg);
