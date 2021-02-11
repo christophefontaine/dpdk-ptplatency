@@ -207,10 +207,12 @@ port_ieee1588_tx_timestamp_check(uint16_t pi, struct timespec *timestamp)
 		       pi, MAX_TX_TMST_WAIT_MICROSECS);
 		return;
 	}
+	/*
 	printf("Port %u TX timestamp value %lu s %lu ns validated after "
 	       "%u micro-second%s\n",
 	       pi, timestamp->tv_sec, timestamp->tv_nsec, wait_us,
 	       (wait_us == 1) ? "" : "s");
+		   */
 }
 
 
@@ -309,6 +311,23 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 	uint64_t t1 = 0;
 	uint64_t t2 = 0;
 
+	for (uint16_t portid = 1; portid < ptp_enabled_port_nb; portid++) {
+		struct timespec time_p0, time_p1;
+		int64_t p0p1_diff = 0;
+		rte_eth_timesync_read_time(0, &time_p0);
+		rte_eth_timesync_read_time(portid, &time_p1);
+	
+		p0p1_diff = timespec64_to_ns( &time_p0) - timespec64_to_ns(&time_p1);
+		printf("\nTime P0 P%d Diff: %ldns", portid, p0p1_diff);
+	}
+	for (uint16_t portid = 1; portid < ptp_enabled_port_nb; portid++) {
+		uint64_t t0, t1;
+		rte_eth_read_clock(0, &t0);
+		rte_eth_read_clock(portid, &t1);
+
+		printf("\nClock P0 P%d Diff: %ld", portid, t0-t1);
+	}
+
 	t1 = timespec64_to_ns(&ptp_data->ts_rx_sync);
 	t2 = timespec64_to_ns(&ptp_data->ts_fup);
 	delta = t1 - t2;
@@ -318,8 +337,8 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 			(ptp_data->ts_rx_sync.tv_sec),
 			(ptp_data->ts_rx_sync.tv_nsec));
 
-	printf("\nT2 - FUP RX ts.  %lds %ldns",
-			ptp_data->ts_fup.tv_sec,
+	printf("\nT2 - FUP  RX ts.  %lds %ldns",
+			(ptp_data->ts_fup.tv_sec),
 			(ptp_data->ts_fup.tv_nsec));
 
 	
@@ -328,6 +347,7 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 	for (int i = 0 ; i < DELTA_SAMPLES ; i++) {
 		delta_avg += ptp_data->delta_acc[i];
 	}
+
 	delta_avg = (int64_t) delta_avg / DELTA_SAMPLES;
 	printf("\t AVG (last %d samples): %ldns", DELTA_SAMPLES, delta_avg);
 
@@ -353,10 +373,10 @@ print_sync_delay(struct ptpv2_data_slave_ordinary *ptp_data) {
 
 	time_t tp = ptp_data->new_adj.tv_sec;
 
-	printf("\nCurrent SYS Time: %.24s %.6ld ns",
+	printf("\nCurrent SYS Time: %.24s %.6ld us",
 				ctime(&tp), ptp_data->new_adj.tv_usec);
 
-	printf("\nDelta between PTP and Linux Kernel time:%"PRId64"ns\n",
+	printf("\nDelta between PTP and Linux Kernel time:   %.9"PRId64" ns\n",
 				nsec);
 
 	
@@ -624,7 +644,7 @@ lcore_main(void)
 			/* PTP TWO STEPS: first SYNC message is followed by a FOLLOW_UP MESSAGE
 			 * which contains the origin timestamp of the SYNC message with the same
 			 * sequence id.
-			 * */
+			 */
 			sync_msg->header.flag_field[0] = 0x2; //PTP_TWO_STEPS
 			fup_msg = (struct follow_up_msg *) (rte_pktmbuf_mtod(fup_pkt, char *) +
 												sizeof(struct rte_ether_hdr));
